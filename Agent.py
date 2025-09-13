@@ -17,7 +17,7 @@ from datetime import datetime
 from typing import Optional, Dict, List, Tuple, Any, Set
 from dataclasses import dataclass, field
 from enum import Enum
-from collections import deque
+from collections import defaultdict, deque
 import time
 import re
 from pathlib import Path
@@ -1325,19 +1325,20 @@ class ChallengeTreeResearchAgent:
         logger.info("Challenge-driven research agent initialized")
     
     def _connect_neo4j(self) -> Optional[GraphDatabase.driver]:
-        """Connect to Neo4j"""
+        """Connect to Neo4j using environment credentials"""
         try:
-            driver = GraphDatabase.driver(
-                "bolt://localhost:8228",
-                auth=("neo4j", "password")
-            )
+            uri = self.config.get('neo4j_uri', 'bolt://localhost:8228')
+            user = self.config.get('neo4j_user', 'neo4j')
+            password = self.config.get('neo4j_pass', 'password')
+            
+            driver = GraphDatabase.driver(uri, auth=(user, password))
             with driver.session() as session:
                 session.run("RETURN 1")
-            logger.info("Connected to Neo4j")
+            logger.info(f"Connected to Neo4j at {uri}")
             return driver
-        except:
-            logger.warning("Neo4j not available")
-            return None
+        except Exception as e:
+            logger.warning(f"Neo4j not available: {str(e)[:50]}")
+        return None
     
     async def fetch_external_knowledge(self, query: str) -> List[Dict]:
         """Fetch from ArXiv"""
@@ -1811,55 +1812,125 @@ class ChallengeTreeResearchAgent:
 
 
 async def main():
-    """Main entry point"""
+    """Main entry point - requires investigation"""
     
     print("\n" + "="*80)
     print("CHALLENGE-DRIVEN SWARM INTELLIGENCE RESEARCH SYSTEM")
     print("="*80)
+    
+    # Get investigation context (REQUIRED)
+    workspace = os.getenv('THINKTICA_WORKSPACE', 'unknown')
+    investigation_id = os.getenv('THINKTICA_INVESTIGATION_ID')
+    research_question = os.getenv('THINKTICA_RESEARCH_QUESTION')
+    
+    # Neo4j connection from environment
+    neo4j_uri = os.getenv('THINKTICA_NEO4J_URI', 'bolt://localhost:8228')
+    neo4j_user = os.getenv('THINKTICA_NEO4J_USER', 'neo4j')
+    neo4j_pass = os.getenv('THINKTICA_NEO4J_PASS', 'password')
+    
+    # Require investigation
+    if not investigation_id or not research_question:
+        print("\nERROR: No investigation context provided")
+        print("This agent requires an investigation to run.")
+        print("\nExpected environment variables:")
+        print("  THINKTICA_INVESTIGATION_ID")
+        print("  THINKTICA_RESEARCH_QUESTION")
+        print("\nCreate investigation with:")
+        print(f"  thinktica workspace investigation new {workspace} \"Your research question\"")
+        print(f"  thinktica start {workspace} --investigation <id>")
+        sys.exit(1)
+    
+    print(f"\nInvestigation: {investigation_id}")
+    print(f"Question: {research_question}")
+    print(f"Workspace: {workspace}")
     
     # Check available backends
     backend = get_llm_backend()
     print(f"\nLocal LLM Backend: {backend.backend}")
     
     if backend.backend == 'mock':
-        print("\nWARNING: No local LLM available. System will use mock responses.")
-        print("\nTo enable local LLM, choose one option:")
-        print("1. Let the script auto-install llama-cpp-python (recommended)")
-        print("2. pip install transformers torch")
-        print("3. Install Ollama from ollama.ai")
-        
-        if not input("\nContinue? (y/n): ").lower().startswith('y'):
-            return
+        print("\nERROR: No local LLM available")
+        print("Install one of:")
+        print("  - llama-cpp-python")
+        print("  - transformers")
+        print("  - ollama")
+        sys.exit(1)
     
     # Configuration
     config = {
         'remote_provider': os.getenv('LLM_PROVIDER', 'groq'),
         'max_depth': 3,
-        'max_iterations': 10
+        'max_iterations': 10,
+        'neo4j_uri': neo4j_uri,
+        'neo4j_user': neo4j_user,
+        'neo4j_pass': neo4j_pass
     }
     
     # Check remote LLM
     api_key_env = f"{config['remote_provider'].upper()}_API_KEY"
     if not os.getenv(api_key_env):
         print(f"\nWARNING: No {api_key_env} found.")
-        print(f"Set it with: export {api_key_env}='your-api-key'")
-        print("\nAvailable free providers:")
-        print("  - groq: https://console.groq.com/keys")
-        print("  - together: https://api.together.xyz/")
-        print("\nSystem will use simplified strategic directions.")
+        print("System will use simplified strategic directions.")
     
-    # Research question
-    default_goal = "How can we develop safe and effective CRISPR-based treatments for neurodegenerative diseases?"
-    
-    print(f"\nDefault research goal: {default_goal}")
-    custom = input("Enter custom goal (or press Enter for default): ").strip()
-    goal = custom if custom else default_goal
-    
-    # Create and run agent
+    # Create and run agent (using research_question as goal)
     agent = ChallengeTreeResearchAgent(config)
-    await agent.research(goal, max_depth=3)
+    agent.investigation_id = investigation_id  # Store for reference
     
-    # Show analytics
+    # Link to investigation in Neo4j
+    if agent.driver:
+        try:
+            with agent.driver.session() as session:
+                session.run("""
+                    MATCH (i:Investigation {id: $id})
+                    MERGE (ai:AgentInvestigation {
+                        investigation_id: $id,
+                        agent_type: 'ChallengeTreeAgent',
+                        started_at: datetime()
+                    })
+                    MERGE (ai)-[:EXTENDS]->(i)
+                    SET i.last_active = datetime(),
+                        i.status = 'in_progress'
+                """, id=investigation_id)
+                print("✓ Linked to Investigation in Neo4j")
+        except Exception as e:
+            print(f"Warning: Could not link to investigation: {str(e)[:50]}")
+    
+    # Run the research (using research_question as the goal)
+    await agent.research(research_question, max_depth=3)
+    
+    # Store top findings linked to investigation
+    if agent.driver and investigation_id:
+        try:
+            with agent.driver.session() as session:
+                # Collect all findings
+                all_findings = []
+                for node in agent.swarm.research_tree.values():
+                    all_findings.extend(node.findings)
+                
+                # Sort by confidence and store top findings
+                all_findings.sort(key=lambda x: x.get('confidence', 0), reverse=True)
+                stored = 0
+                
+                for finding in all_findings[:20]:
+                    if finding.get('confidence', 0) > 0.5:
+                        session.run("""
+                            MATCH (i:Investigation {id: $inv_id})
+                            CREATE (f:Finding {
+                                statement: $statement,
+                                confidence: $confidence,
+                                timestamp: datetime()
+                            })
+                            CREATE (i)-[:DISCOVERED]->(f)
+                        """, inv_id=investigation_id,
+                             statement=finding.get('statement', ''),
+                             confidence=finding.get('confidence', 0))
+                        stored += 1
+                
+                print(f"\n✓ Stored {stored} findings for investigation {investigation_id}")
+        except Exception as e:
+            print(f"Could not store findings: {str(e)[:50]}")
+    
+    # Show analytics (existing code)
     print("\n" + "="*80)
     print("CHALLENGE RESOLUTION ANALYTICS")
     print("="*80)
@@ -1883,6 +1954,8 @@ async def main():
     # Cleanup
     if agent.driver:
         agent.driver.close()
+    
+    print("\nAgent completed successfully")
 
 
 if __name__ == '__main__':

@@ -1,0 +1,10 @@
+author: ''
+dependencies: []
+description: Main agent for cancer-vaccine-researcher workspace
+interfaces:
+- IQueryable
+- IResearchable
+- IMergeable
+name: workspace/cancer-vaccine-researcher
+type: researcher
+version: 0.1.0
